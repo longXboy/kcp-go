@@ -3,6 +3,7 @@ package kcp
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"net"
@@ -68,8 +69,9 @@ type (
 		updaterIdx int            // record slice index in updater
 		conn       net.PacketConn // the underlying packet connection
 		kcp        *KCP           // KCP ARQ protocol
-		l          *Listener      // point to the Listener if it's accepted by Listener
-		block      BlockCrypt     // block encryption
+		kcps       map[uint32]*KCP
+		l          *Listener  // point to the Listener if it's accepted by Listener
+		block      BlockCrypt // block encryption
 
 		// kcp receiving is based on packets
 		// recvbuf turns packets into stream
@@ -542,6 +544,27 @@ func (s *UDPSession) notifyWriteEvent() {
 	}
 }
 
+func (s *UDPSession) findAndInput(data []byte) error {
+	streamId := binary.LittleEndian.Uint32(data)
+	var kcp *KCP
+	var isok bool
+	if kcp, isok = s.kcps[streamId]; !isok {
+		cmd := data[8]
+		if cmd != IKCP_CMD_SYNC {
+			return fmt.Errorf("found new stream without cmd_sync")
+		} else {
+			conv := binary.LittleEndian.Uint32(data[4:])
+			kcp = NewKCP(conv, func(buf []byte, size int) {
+				if size >= IKCP_OVERHEAD {
+					s.output(buf[:size])
+				}
+			})
+			s.kcps[streamId] = kcp
+		}
+	}
+	return kcp.Input(data[4:], true, s.ackNoDelay)
+}
+
 func (s *UDPSession) kcpInput(data []byte) {
 	var kcpInErrors, fecErrs, fecRecovered, fecParityShards uint64
 
@@ -549,7 +572,8 @@ func (s *UDPSession) kcpInput(data []byte) {
 		f := s.fecDecoder.decodeBytes(data)
 		s.mu.Lock()
 		if f.flag == typeData {
-			if ret := s.kcp.Input(data[fecHeaderSizePlus2:], true, s.ackNoDelay); ret != 0 {
+			data = data[fecHeaderSizePlus2:]
+			if ret := s.findAndInput(data); ret != 0 {
 				kcpInErrors++
 			}
 		}
@@ -564,9 +588,8 @@ func (s *UDPSession) kcpInput(data []byte) {
 					if len(r) >= 2 { // must be larger than 2bytes
 						sz := binary.LittleEndian.Uint16(r)
 						if int(sz) <= len(r) && sz >= 2 {
-							if ret := s.kcp.Input(r[2:sz], false, s.ackNoDelay); ret == 0 {
-								fecRecovered++
-							} else {
+							data = r[2:]
+							if ret := s.findAndInput(data); ret != 0 {
 								kcpInErrors++
 							}
 						} else {
@@ -586,7 +609,8 @@ func (s *UDPSession) kcpInput(data []byte) {
 		s.mu.Unlock()
 	} else {
 		s.mu.Lock()
-		if ret := s.kcp.Input(data, true, s.ackNoDelay); ret != 0 {
+
+		if ret := s.findAndInput(data); ret != 0 {
 			kcpInErrors++
 		}
 		// notify reader

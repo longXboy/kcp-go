@@ -11,6 +11,7 @@ const (
 	IKCP_RTO_MIN     = 100 // normal min rto
 	IKCP_RTO_DEF     = 200
 	IKCP_RTO_MAX     = 60000
+	IKCP_CMD_SYNC    = 80 // cmd: initial handshake
 	IKCP_CMD_PUSH    = 81 // cmd: push data
 	IKCP_CMD_ACK     = 82 // cmd: ack
 	IKCP_CMD_WASK    = 83 // cmd: window probe (ask)
@@ -543,7 +544,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 				maxack = sn
 			}
 			lastackts = ts
-		} else if cmd == IKCP_CMD_PUSH {
+		} else if cmd == IKCP_CMD_PUSH || cmd == IKCP_CMD_SYNC {
 			if _itimediff(sn, kcp.rcv_nxt+kcp.rcv_wnd) < 0 {
 				kcp.ack_push(sn, ts)
 				if _itimediff(sn, kcp.rcv_nxt) >= 0 {
